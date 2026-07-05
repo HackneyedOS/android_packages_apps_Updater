@@ -45,32 +45,34 @@ class UpdatesRepository(
             networkDataSource.fetchUpdates().map { it.toUpdate() }.filter { filterUpdates(it) }
         }
 
-        if (networkUpdates.isEmpty()) return System.currentTimeMillis()
-
         val networkIds = networkUpdates.map { it.downloadId }.toSet()
 
         val localUpdates = withContext(Dispatchers.IO) {
             localDataSource.getUpdates()
         }.associateBy { it.downloadId }
 
-        if (localUpdates.isNotEmpty() && networkUpdates.any { it.downloadId !in localUpdates }) {
+        // Only show notification if there are actually new network updates
+        if (networkUpdates.isNotEmpty() && localUpdates.isNotEmpty() && networkUpdates.any { it.downloadId !in localUpdates }) {
             notificationHelper.showNewUpdatesNotification()
         }
 
         withContext(Dispatchers.IO) {
-            // Merge local state into each network update and upsert into the DB.
-            // Room's observeUpdates() Flow will emit automatically if anything changed.
-            networkUpdates.forEach { networkUpdate ->
-                val local = localUpdates[networkUpdate.downloadId]
-                val update = if (local != null && local.status.persistentStatus > 0) {
-                    networkUpdate.copy(status = local.status, file = local.file)
-                } else {
-                    networkUpdate
+            // Only upsert if the server returned updates
+            if (networkUpdates.isNotEmpty()) {
+                networkUpdates.forEach { networkUpdate ->
+                    val local = localUpdates[networkUpdate.downloadId]
+                    val update = if (local != null && local.status.persistentStatus > 0) {
+                        networkUpdate.copy(status = local.status, file = local.file)
+                    } else {
+                        networkUpdate
+                    }
+                    localDataSource.addUpdate(update)
                 }
-                localDataSource.addUpdate(update)
             }
 
-            // Delete temp files and DB entries for updates no longer advertised by the server.
+            // Always run the cleanup block
+            // This ensures that if an update was installed (and is now filtered out),
+            // it properly gets removed from the local DB.
             localUpdates.values.filter {
                 it.downloadId !in networkIds && it.downloadId != Update.LOCAL_ID &&
                         it.downloadUrl != null
